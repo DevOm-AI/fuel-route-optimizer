@@ -13,6 +13,7 @@ from routing.management.commands.load_stations import clean_stations, match_stat
 from routing.models import FuelStation
 from routing.services import ors
 from routing.services.cities import lookup_city, normalize_place
+from routing.services.geo import haversine_miles, mile_markers
 
 
 def _row(opis_id, state='TX', price='3.50'):
@@ -229,3 +230,20 @@ class DirectionsTests(SimpleTestCase):
         self.request.return_value = _response({'error': 'quota'}, status=429)
         with self.assertRaisesMessage(ors.ORSError, 'HTTP 429'):
             ors.directions(self.start, self.finish)
+
+
+class MileMarkerTests(SimpleTestCase):
+    def test_haversine_known_distance(self):
+        # New York -> Los Angeles is ~2,445 miles as the crow flies.
+        self.assertAlmostEqual(float(haversine_miles(40.7128, -74.0060, 34.0522, -118.2437)), 2445, delta=5)
+
+    def test_cumulative_miles_along_line(self):
+        # One degree of latitude is ~69.1 miles.
+        markers = mile_markers([[-90.0, 30.0], [-90.0, 31.0], [-90.0, 32.0]])
+        self.assertEqual(markers[0], 0.0)
+        self.assertAlmostEqual(markers[1], 69.1, delta=0.1)
+        self.assertAlmostEqual(markers[2], 2 * markers[1], delta=1e-9)
+
+    def test_empty_and_single_point_lines(self):
+        self.assertEqual(len(mile_markers([])), 0)
+        self.assertEqual(list(mile_markers([[-90.0, 30.0]])), [0.0])
