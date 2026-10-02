@@ -14,3 +14,7 @@ from django.core.asgi import get_asgi_application
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'fuel_route.settings')
 
 application = get_asgi_application()
+
+from routing.apps import warm_caches  # noqa: E402  (needs Django set up)
+
+warm_caches()

@@ -1,5 +1,8 @@
 import hashlib
 import json
+import logging
+import time
+from contextlib import contextmanager
 from urllib.parse import urlencode
 
 from django.core.cache import cache
@@ -13,6 +16,8 @@ from routing.services import ors
 from routing.services.cities import normalize_place
 from routing.services.optimizer import NoFuelInRangeError, plan_route_fuel
 from routing.services.stations import get_station_index
+
+logger = logging.getLogger(__name__)
 
 MAX_LOCATION_LENGTH = 200
 ROUTE_CACHE_SECONDS = 60 * 60 * 24
@@ -52,13 +57,26 @@ def _parse_route_request(body):
     return _validate_locations(data)
 
 
+@contextmanager
+def _timed(step):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        logger.info('%s: %.1f ms', step, (time.perf_counter() - started) * 1000)
+
+
 def build_route_result(start_text, finish_text):
     """geocode -> directions -> stations near route -> optimizer, as a JSON-ready dict."""
-    start = ors.geocode(start_text)
-    finish = ors.geocode(finish_text)
-    route = ors.directions(start, finish)
-    nearby = get_station_index().near_route(route.coordinates, total_miles=route.distance_miles)
-    plan = plan_route_fuel(nearby, route.distance_miles, start)
+    with _timed('geocode'):
+        start = ors.geocode(start_text)
+        finish = ors.geocode(finish_text)
+    with _timed('ors directions'):
+        route = ors.directions(start, finish)
+    with _timed('nearby search'):
+        nearby = get_station_index().near_route(route.coordinates, total_miles=route.distance_miles)
+    with _timed('optimizer'):
+        plan = plan_route_fuel(nearby, route.distance_miles, start)
 
     api_calls = 1 + sum(loc.source == 'ors' for loc in (start, finish))
     return {
@@ -83,8 +101,10 @@ def route_cache_key(start_text, finish_text):
 def get_route_result(start_text, finish_text):
     """The route result for (start, finish), computed once and then served from the cache."""
     key = route_cache_key(start_text, finish_text)
-    result = cache.get(key)
+    with _timed('cache lookup'):
+        result = cache.get(key)
     if result is not None:
+        logger.info('cache hit: %s -> %s', start_text, finish_text)
         return {**result, 'external_api_calls': 0}
     result = build_route_result(start_text, finish_text)
     cache.set(key, result, ROUTE_CACHE_SECONDS)

@@ -1,4 +1,5 @@
 import json
+import logging
 import tempfile
 from decimal import Decimal
 from io import StringIO
@@ -13,6 +14,7 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 
+from routing.apps import warm_caches
 from routing.management.commands.load_stations import clean_stations, match_stations
 from routing.models import FuelStation
 from routing.services import ors
@@ -306,6 +308,25 @@ class StationIndexLoadingTests(TestCase):
         reset_station_index()
         self.addCleanup(reset_station_index)
 
+    def test_empty_table_is_not_pinned(self):
+        self.assertEqual(get_station_index().stations, [])
+        FuelStation.objects.create(
+            opis_id=1, name='A', address='X', city='Tomah', state='WI',
+            price=Decimal('3.10'), lat=43.98, lng=-90.50,
+        )
+        self.assertEqual(len(get_station_index().stations), 1)
+
+    def test_warm_caches_builds_index_once(self):
+        FuelStation.objects.create(
+            opis_id=1, name='A', address='X', city='Tomah', state='WI',
+            price=Decimal('3.10'), lat=43.98, lng=-90.50,
+        )
+        with self.assertLogs('routing', 'INFO') as logs:
+            warm_caches()
+        self.assertIn('Warmed caches: 1 stations', logs.output[0])
+        with self.assertNumQueries(0):
+            get_station_index()
+
     def test_loads_once_from_database(self):
         FuelStation.objects.create(
             opis_id=1, name='A', address='X', city='Tomah', state='WI',
@@ -380,6 +401,8 @@ class RouteApiTests(TestCase):
         self.addCleanup(reset_station_index)
         cache.clear()
         self.addCleanup(cache.clear)
+        logging.disable(logging.INFO)
+        self.addCleanup(logging.disable, logging.NOTSET)
         for opis_id, (lat, lng), price in [
             (1, (41.80, -87.70), '3.50'),
             (2, (40.25, -88.90), '3.00'),
@@ -484,3 +507,12 @@ class RouteApiTests(TestCase):
         response = self.client.get(reverse('route-map'), {'start': 'Chicago, IL'})
         self.assertEqual(response.status_code, 400)
         self.request.assert_not_called()
+
+
+    def test_logs_time_of_each_step(self):
+        logging.disable(logging.NOTSET)
+        with self.assertLogs('routing.views', 'INFO') as logs:
+            self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
+        steps = [line.split(':')[2].strip() for line in logs.output]
+        for step in ('geocode', 'ors directions', 'nearby search', 'optimizer'):
+            self.assertIn(step, steps)

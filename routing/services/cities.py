@@ -14,32 +14,42 @@ def normalize_place(name):
     return re.sub(r'\bst\b\.?', 'saint', name)
 
 
-def load_city_coords(path):
-    """Map (normalized city, state) to (lat, lng); the first (most populous) row wins."""
-    coords = {}
+def _read_cities(path):
+    """One pass over the cities CSV.
+
+    Returns ((normalized city, state) -> (lat, lng), normalized state name/code -> state code).
+    The first (most populous) row wins for duplicate city names.
+    """
+    coords, codes = {}, {}
     with open(path, newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
-            key = (normalize_place(row['city']), row['state_id'].strip().upper())
-            coords.setdefault(key, (float(row['lat']), float(row['lng'])))
-    return coords
+            code = row['state_id'].strip().upper()
+            coords.setdefault((normalize_place(row['city']), code), (float(row['lat']), float(row['lng'])))
+            if code.lower() not in codes:
+                codes[code.lower()] = code
+                if row.get('state_name'):
+                    codes[normalize_place(row['state_name'])] = code
+    return coords, codes
+
+
+def load_city_coords(path):
+    """Map (normalized city, state) to (lat, lng)."""
+    return _read_cities(path)[0]
 
 
 @lru_cache(maxsize=1)
+def _city_data():
+    return _read_cities(DEFAULT_CITIES_CSV)
+
+
 def city_index():
     """(normalized city, state) -> (lat, lng), loaded once per process."""
-    return load_city_coords(DEFAULT_CITIES_CSV)
+    return _city_data()[0]
 
 
-@lru_cache(maxsize=1)
 def state_codes():
     """Normalized state name or code -> two-letter state code."""
-    codes = {}
-    with open(DEFAULT_CITIES_CSV, newline='', encoding='utf-8') as f:
-        for row in csv.DictReader(f):
-            code = row['state_id'].strip().upper()
-            codes.setdefault(code.lower(), code)
-            codes.setdefault(normalize_place(row['state_name']), code)
-    return codes
+    return _city_data()[1]
 
 
 def lookup_city(text):
