@@ -105,12 +105,15 @@ _index = None
 def get_station_index():
     """The process-wide station index, built from the database on first use."""
     global _index
-    if _index is None:
-        _index = StationIndex(
-            Station(s.opis_id, s.name, s.address, s.city, s.state, s.price, s.lat, s.lng)
-            for s in FuelStation.objects.all()
-        )
-    return _index
+    if _index is not None:
+        return _index
+    index = StationIndex(
+        Station(s.opis_id, s.name, s.address, s.city, s.state, s.price, s.lat, s.lng)
+        for s in FuelStation.objects.all()
+    )
+    if index.stations:  # don't pin an empty index if load_stations hasn't run yet
+        _index = index
+    return index
 
 
 def reset_station_index():

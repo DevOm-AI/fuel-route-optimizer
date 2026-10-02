@@ -149,3 +149,19 @@ MAILERS = {
 
 # OpenRouteService
 ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
+
+
+# Logging: per-step timings from the routing app
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {'format': '{asctime} {levelname} {name}: {message}', 'style': '{'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},
+    },
+    'loggers': {
+        'routing': {'handlers': ['console'], 'level': os.environ.get('ROUTING_LOG_LEVEL', 'INFO')},
+    },
+}
