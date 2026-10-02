@@ -40,7 +40,7 @@ def plan_fuel_stops(options, total_miles, range_miles=500.0, mpg=10.0):
 
     stations = sorted(
         (o for o in options if -EPSILON <= o.mile <= total_miles + EPSILON),
-        key=lambda o: o.mile,
+        key=lambda o: (o.mile, o.price),  # cheapest first among equally near stations
     )
     if not stations:
         raise NoFuelInRangeError('No fuel station found along the route.')
@@ -98,7 +98,7 @@ def plan_route_fuel(nearby_stations, total_miles, start, range_miles=500.0, mpg=
     """
     options = [FuelOption(n.mile_marker, float(n.station.price), n) for n in nearby_stations]
     purchases = plan_fuel_stops(options, total_miles, range_miles, mpg)
-    nearest = min(nearby_stations, key=lambda n: n.mile_marker, default=None)
+    nearest = min(nearby_stations, key=lambda n: (n.mile_marker, n.station.price), default=None)
 
     stops = []
     for purchase in purchases:

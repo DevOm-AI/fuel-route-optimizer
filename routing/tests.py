@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import tempfile
 from decimal import Decimal
 from io import StringIO
@@ -363,6 +364,72 @@ class GreedyOptimizerTests(SimpleTestCase):
         with self.assertRaises(NoFuelInRangeError):
             plan_fuel_stops([], 100)
 
+
+
+def _brute_force_cost(options, total_miles, range_miles=500, mpg=10, unit=10):
+    """Exact minimum cost by DP over fuel levels; positions must be multiples of unit miles."""
+    stations = sorted(o for o in options if o[0] <= total_miles)
+    stops = [(0, stations[0][1]), *stations]
+    capacity = range_miles // unit
+    best = {0: 0.0}  # fuel units in the tank on arrival -> cheapest cost so far
+    for k, (mile, price) in enumerate(stops):
+        bought = [float('inf')] * (capacity + 1)
+        running = float('inf')
+        for level in range(capacity + 1):
+            running = min(running + price * unit / mpg, best.get(level, float('inf')))
+            bought[level] = running
+        next_mile = stops[k + 1][0] if k + 1 < len(stops) else total_miles
+        hop = (next_mile - mile) // unit
+        best = {level - hop: cost for level, cost in enumerate(bought) if level >= hop and cost < float('inf')}
+        if not best:
+            return None
+    return min(best.values())
+
+
+class OptimizerTests(SimpleTestCase):
+    def test_trip_under_range_is_one_purchase(self):
+        purchases = plan_fuel_stops([FuelOption(5, 3.25, 'A'), FuelOption(200, 3.40, 'B')], 420)
+        self.assertEqual(len(purchases), 1)
+        self.assertAlmostEqual(purchases[0].gallons, 42.0)
+        self.assertAlmostEqual(purchases[0].cost, 420 / 10 * 3.25)
+
+    def test_buys_only_enough_to_reach_cheaper_station_ahead(self):
+        options = [FuelOption(0, 4.00, 'A'), FuelOption(180, 3.00, 'B'), FuelOption(400, 3.50, 'C')]
+        purchases = plan_fuel_stops(options, 600)
+        self.assertEqual([p.option.data for p in purchases], [None, 'B'])
+        self.assertAlmostEqual(purchases[0].gallons, 18.0)  # just the 180 mi to B
+        self.assertAlmostEqual(purchases[1].gallons, 42.0)  # B covers the remaining 420 mi
+        self.assertAlmostEqual(sum(p.cost for p in purchases), 18 * 4.00 + 42 * 3.00)
+
+    def test_virtual_start_uses_cheapest_of_equally_near_stations(self):
+        options = [FuelOption(60, 4.40, 'A'), FuelOption(60, 3.90, 'B')]
+        for ordered in (options, options[::-1]):
+            purchases = plan_fuel_stops(ordered, 300)
+            self.assertEqual(purchases[0].option.price, 3.90)
+
+    def test_gap_over_range_raises(self):
+        options = [FuelOption(0, 3.0, 'A'), FuelOption(300, 3.0, 'B'), FuelOption(850, 3.0, 'C')]
+        with self.assertRaisesMessage(NoFuelInRangeError, 'No fuel within 500 miles'):
+            plan_fuel_stops(options, 1200)
+
+    def test_greedy_matches_brute_force_on_random_routes(self):
+        rng = random.Random(42)
+        checked = 0
+        for _ in range(100):
+            total = rng.randrange(100, 2500, 10)
+            options = {(rng.randrange(0, total + 1, 10), round(rng.uniform(2.5, 4.5), 3))
+                       for _ in range(rng.randint(1, 15))}
+            expected = _brute_force_cost(options, total)
+            try:
+                purchases = plan_fuel_stops([FuelOption(m, p) for m, p in options], total)
+            except NoFuelInRangeError:
+                self.assertIsNone(expected, (total, sorted(options)))
+                continue
+            self.assertIsNotNone(expected, (total, sorted(options)))
+            self.assertAlmostEqual(sum(p.cost for p in purchases), expected, places=6, msg=(total, sorted(options)))
+            self.assertAlmostEqual(sum(p.gallons for p in purchases), total / 10)
+            checked += 1
+        self.assertGreater(checked, 20)  # enough feasible routes were actually compared
 
 class FuelPlanOutputTests(SimpleTestCase):
     start = ors.Location('Chicago, IL', 41.88, -87.63, 'local')
