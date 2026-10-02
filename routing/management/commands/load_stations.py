@@ -1,5 +1,4 @@
 import csv
-import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -8,11 +7,11 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from routing.models import FuelStation
+from routing.services.cities import DEFAULT_CITIES_CSV, load_city_coords, normalize_place
 
 CANADIAN_PROVINCES = frozenset({'AB', 'BC', 'MB', 'NB', 'NS', 'ON', 'QC', 'SK', 'YT'})
 
 DEFAULT_FUEL_CSV = Path(settings.BASE_DIR) / 'data' / 'fuel-prices-for-be-assessment.csv'
-DEFAULT_CITIES_CSV = Path(settings.BASE_DIR) / 'data' / 'uscities.csv'
 
 
 def read_fuel_rows(path):
@@ -42,22 +41,6 @@ def clean_stations(rows):
         if current is None or row['price'] < current['price']:
             cheapest[row['opis_id']] = row
     return list(cheapest.values())
-
-
-def normalize_place(name):
-    """Normalize a city name for joining: lowercase, trim, 'st.' -> 'saint'."""
-    name = re.sub(r'\s+', ' ', name.strip().lower())
-    return re.sub(r'\bst\b\.?', 'saint', name)
-
-
-def load_city_coords(path):
-    """Map (normalized city, state) to (lat, lng); the first (most populous) row wins."""
-    coords = {}
-    with open(path, newline='', encoding='utf-8') as f:
-        for row in csv.DictReader(f):
-            key = (normalize_place(row['city']), row['state_id'].strip().upper())
-            coords.setdefault(key, (float(row['lat']), float(row['lng'])))
-    return coords
 
 
 def match_stations(stations, city_coords):

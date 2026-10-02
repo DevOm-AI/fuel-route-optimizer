@@ -3,11 +3,16 @@ from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 
-from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase
+from unittest import mock
 
-from routing.management.commands.load_stations import clean_stations, match_stations, normalize_place
+import requests
+from django.core.management import call_command
+from django.test import SimpleTestCase, TestCase, override_settings
+
+from routing.management.commands.load_stations import clean_stations, match_stations
 from routing.models import FuelStation
+from routing.services import ors
+from routing.services.cities import lookup_city, normalize_place
 
 
 def _row(opis_id, state='TX', price='3.50'):
@@ -92,3 +97,87 @@ class LoadStationsCommandTests(TestCase):
         self._run()
         self._run()
         self.assertEqual(FuelStation.objects.count(), 2)
+
+
+def _response(payload=None, status=200):
+    response = mock.Mock(status_code=status)
+    response.json.return_value = payload
+    if status >= 400:
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+    return response
+
+
+def _geocode_payload(lng, lat, country='USA'):
+    return {'features': [{'geometry': {'coordinates': [lng, lat]}, 'properties': {'country_a': country}}]}
+
+
+class LookupCityTests(SimpleTestCase):
+    def test_finds_city_by_state_code_or_name(self):
+        lat, lng = lookup_city('Chicago, IL')
+        self.assertAlmostEqual(lat, 41.8, places=0)
+        self.assertAlmostEqual(lng, -87.7, places=0)
+        self.assertEqual(lookup_city('chicago, illinois'), (lat, lng))
+
+    def test_returns_none_for_unknown_or_unparseable_input(self):
+        self.assertIsNone(lookup_city('Atlantis, ZZ'))
+        self.assertIsNone(lookup_city('Chicago'))
+        self.assertIsNone(lookup_city(', IL'))
+
+
+@override_settings(ORS_API_KEY='test-key')
+class GeocodeTests(SimpleTestCase):
+    def setUp(self):
+        patcher = mock.patch.object(ors._session, 'request')
+        self.request = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_local_city_needs_no_api_call(self):
+        location = ors.geocode('  New York, NY ')
+        self.assertEqual((location.query, location.source), ('New York, NY', 'local'))
+        self.request.assert_not_called()
+
+    def test_falls_back_to_ors_geocode(self):
+        self.request.return_value = _response(_geocode_payload(-77.03, 38.89))
+        location = ors.geocode('1600 Pennsylvania Ave, Washington DC')
+        self.assertEqual((location.lat, location.lng, location.source), (38.89, -77.03, 'ors'))
+        method, url = self.request.call_args.args
+        kwargs = self.request.call_args.kwargs
+        self.assertEqual((method, url), ('GET', f'{ors.ORS_BASE_URL}/geocode/search'))
+        self.assertEqual(kwargs['params']['boundary.country'], 'US')
+        self.assertEqual(kwargs['params']['size'], 1)
+        self.assertEqual(kwargs['timeout'], ors.TIMEOUT_SECONDS)
+        self.assertEqual(kwargs['headers']['Authorization'], 'test-key')
+
+    def test_rejects_empty_input(self):
+        for value in ('', '   ', None):
+            with self.assertRaises(ors.LocationError):
+                ors.geocode(value)
+        self.request.assert_not_called()
+
+    def test_no_result_is_a_location_error(self):
+        self.request.return_value = _response({'features': []})
+        with self.assertRaises(ors.LocationError):
+            ors.geocode('Nowhere Special')
+
+    def test_rejects_points_outside_usa(self):
+        self.request.return_value = _response(_geocode_payload(2.35, 48.85, country='FRA'))
+        with self.assertRaisesMessage(ors.LocationError, 'outside the USA'):
+            ors.geocode('Paris, France')
+        self.request.return_value = _response(_geocode_payload(-99.13, 19.43, country=None))
+        with self.assertRaisesMessage(ors.LocationError, 'outside the USA'):
+            ors.geocode('Somewhere south')
+
+    def test_upstream_failures_raise_ors_error(self):
+        for failure in (_response(status=500), requests.Timeout(), requests.ConnectionError()):
+            if isinstance(failure, Exception):
+                self.request.side_effect, self.request.return_value = failure, None
+            else:
+                self.request.side_effect, self.request.return_value = None, failure
+            with self.assertRaises(ors.ORSError):
+                ors.geocode('Some Unknown Place')
+
+    @override_settings(ORS_API_KEY='')
+    def test_missing_api_key_raises_ors_error(self):
+        with self.assertRaisesMessage(ors.ORSError, 'ORS_API_KEY'):
+            ors.geocode('Some Unknown Place')
+        self.request.assert_not_called()
