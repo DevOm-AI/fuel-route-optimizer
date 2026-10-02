@@ -49,13 +49,19 @@ class StationIndex:
         self.lng = np.array([s.lng for s in self.stations], dtype=float)
         self.tree = cKDTree(_unit_vectors(self.lat, self.lng)) if self.stations else None
 
-    def near_route(self, coordinates, radius_miles=DEFAULT_RADIUS_MILES):
-        """Stations within radius_miles of a [lng, lat] line, one entry each, sorted by mile marker."""
+    def near_route(self, coordinates, radius_miles=DEFAULT_RADIUS_MILES, total_miles=None):
+        """Stations within radius_miles of a [lng, lat] line, one entry each, sorted by mile marker.
+
+        When total_miles is given (e.g. the road distance from ORS), mile markers are scaled so
+        the end of the line sits at total_miles.
+        """
         if self.tree is None or len(coordinates) == 0:
             return []
 
         points = np.asarray(coordinates, dtype=float)
         markers = mile_markers(points)
+        if total_miles is not None and markers[-1] > 0:
+            markers = markers * (total_miles / markers[-1])
         keep = thin_route(markers)
         route_lng, route_lat, route_miles = points[keep, 0], points[keep, 1], markers[keep]
 
