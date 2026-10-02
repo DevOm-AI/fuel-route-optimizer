@@ -149,6 +149,7 @@ MAILERS = {
 
 # OpenRouteService
 ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 
 
 # Logging: per-step timings from the routing app
