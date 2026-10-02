@@ -583,3 +583,46 @@ class RouteApiTests(TestCase):
         steps = [line.split(':')[2].strip() for line in logs.output]
         for step in ('geocode', 'ors directions', 'nearby search', 'optimizer'):
             self.assertIn(step, steps)
+
+
+    def _route_ors_by_url(self, geocode_payload):
+        directions = _response(_directions_payload(self.line, 300 * 1609.344))
+
+        def fake_request(method, url, **kwargs):
+            return _response(geocode_payload) if url.endswith('/geocode/search') else directions
+
+        self.request.side_effect = fake_request
+
+    def test_ors_geocode_fallback_is_counted_and_cached(self):
+        self._route_ors_by_url(_geocode_payload(-87.75, 41.80))
+        payload = {'start': 'Midway Airport, Chicago', 'finish': 'St. Louis, MO'}
+
+        first = self._post(payload)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()['external_api_calls'], 2)  # geocode + directions
+        self.assertEqual(first.json()['start']['lat'], 41.80)
+        self.assertEqual(self.request.call_count, 2)
+
+        second = self._post(payload)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()['external_api_calls'], 0)
+        self.assertEqual(self.request.call_count, 2)  # no new ORS calls
+
+    def test_location_outside_usa_is_400(self):
+        self._route_ors_by_url(_geocode_payload(-99.13, 19.43, country='MEX'))
+        response = self._post({'start': 'Mexico City', 'finish': 'St. Louis, MO'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('outside the USA', response.json()['error'])
+
+    def test_fuel_stop_fields(self):
+        stops = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'}).json()['fuel_stops']
+        self.assertTrue(stops)
+        required = {'type', 'name', 'address', 'city', 'state', 'lat', 'lng',
+                    'price', 'mile_marker', 'gallons', 'cost'}
+        for stop in stops:
+            self.assertLessEqual(required, set(stop))
+            self.assertGreater(stop['gallons'], 0)
+        self.assertEqual(stops[0]['type'], 'start')
+        self.assertTrue(all(stop['type'] == 'station' for stop in stops[1:]))
+        miles = [stop['mile_marker'] for stop in stops]
+        self.assertEqual(miles, sorted(miles))
