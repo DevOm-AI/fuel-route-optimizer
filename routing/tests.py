@@ -5,6 +5,7 @@ from pathlib import Path
 
 from unittest import mock
 
+import numpy as np
 import requests
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -14,6 +15,7 @@ from routing.models import FuelStation
 from routing.services import ors
 from routing.services.cities import lookup_city, normalize_place
 from routing.services.geo import haversine_miles, mile_markers
+from routing.services.stations import Station, StationIndex, get_station_index, reset_station_index, thin_route
 
 
 def _row(opis_id, state='TX', price='3.50'):
@@ -247,3 +249,59 @@ class MileMarkerTests(SimpleTestCase):
     def test_empty_and_single_point_lines(self):
         self.assertEqual(len(mile_markers([])), 0)
         self.assertEqual(list(mile_markers([[-90.0, 30.0]])), [0.0])
+
+
+def _station(opis_id, lat, lng, price='3.00'):
+    return Station(opis_id, f'S{opis_id}', 'I-55, EXIT 1', 'Town', 'IL', Decimal(price), lat, lng)
+
+
+class StationsNearRouteTests(SimpleTestCase):
+    # A north-south line along lng -90 from lat 30 to 32 (~138 miles); 0.01 deg lat ~ 0.69 mi.
+    line = [[-90.0, 30.0 + i * 0.01] for i in range(201)]
+
+    def test_thin_route_keeps_about_one_point_per_mile(self):
+        markers = mile_markers(self.line)
+        idx = thin_route(markers)
+        self.assertEqual(idx[0], 0)
+        self.assertEqual(idx[-1], len(self.line) - 1)
+        self.assertLessEqual(np.diff(markers[idx]).max(), 1.0 + 0.7)
+        self.assertLess(len(idx), len(self.line))
+
+    def test_filters_by_radius_and_sorts_by_mile_marker(self):
+        index = StationIndex([
+            _station(1, 31.5, -90.0),            # on the line, ~103.6 mi
+            _station(2, 30.5, -90.1),            # ~6 mi off the line, ~34.5 mi
+            _station(3, 31.0, -90.5),            # ~30 mi off the line: excluded
+            _station(4, 40.0, -100.0),           # far away: excluded
+        ])
+        nearby = index.near_route(self.line, radius_miles=10)
+        self.assertEqual([n.station.opis_id for n in nearby], [2, 1])
+        self.assertAlmostEqual(nearby[0].mile_marker, 34.5, delta=1.0)
+        self.assertAlmostEqual(nearby[0].distance_miles, 6.0, delta=0.2)
+        self.assertAlmostEqual(nearby[1].mile_marker, 103.6, delta=1.0)
+        self.assertLess(nearby[1].distance_miles, 0.5)
+
+    def test_each_station_appears_once_at_its_nearest_point(self):
+        index = StationIndex([_station(1, 31.0, -90.05)])
+        nearby = index.near_route(self.line, radius_miles=10)
+        self.assertEqual(len(nearby), 1)
+        self.assertAlmostEqual(nearby[0].mile_marker, mile_markers([[-90, 30], [-90, 31]])[1], delta=1.0)
+
+    def test_empty_index_or_route(self):
+        self.assertEqual(StationIndex([]).near_route(self.line), [])
+        self.assertEqual(StationIndex([_station(1, 30.0, -90.0)]).near_route([]), [])
+
+
+class StationIndexLoadingTests(TestCase):
+    def setUp(self):
+        reset_station_index()
+        self.addCleanup(reset_station_index)
+
+    def test_loads_once_from_database(self):
+        FuelStation.objects.create(
+            opis_id=1, name='A', address='X', city='Tomah', state='WI',
+            price=Decimal('3.10'), lat=43.98, lng=-90.50,
+        )
+        index = get_station_index()
+        self.assertEqual([s.opis_id for s in index.stations], [1])
+        self.assertIs(get_station_index(), index)
