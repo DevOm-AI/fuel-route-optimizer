@@ -181,3 +181,51 @@ class GeocodeTests(SimpleTestCase):
         with self.assertRaisesMessage(ors.ORSError, 'ORS_API_KEY'):
             ors.geocode('Some Unknown Place')
         self.request.assert_not_called()
+
+
+def _directions_payload(coordinates, distance_meters):
+    return {
+        'features': [
+            {
+                'geometry': {'coordinates': coordinates},
+                'properties': {'summary': {'distance': distance_meters}},
+            }
+        ]
+    }
+
+
+@override_settings(ORS_API_KEY='test-key')
+class DirectionsTests(SimpleTestCase):
+    start = ors.Location('Chicago, IL', 41.88, -87.63, 'local')
+    finish = ors.Location('St. Louis, MO', 38.63, -90.20, 'local')
+
+    def setUp(self):
+        patcher = mock.patch.object(ors._session, 'request')
+        self.request = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_posts_lng_lat_pairs_and_parses_route(self):
+        line = [[-87.63, 41.88], [-89.0, 40.0], [-90.20, 38.63]]
+        self.request.return_value = _response(_directions_payload(line, 476_000))
+        route = ors.directions(self.start, self.finish)
+
+        method, url = self.request.call_args.args
+        self.assertEqual((method, url), ('POST', f'{ors.ORS_BASE_URL}/v2/directions/driving-car/geojson'))
+        self.assertEqual(
+            self.request.call_args.kwargs['json'],
+            {'coordinates': [[-87.63, 41.88], [-90.20, 38.63]]},
+        )
+        self.assertEqual(self.request.call_args.kwargs['timeout'], ors.TIMEOUT_SECONDS)
+        self.assertEqual(route.coordinates, line)
+        self.assertAlmostEqual(route.distance_miles, 476_000 / 1609.344)
+
+    def test_invalid_payload_raises_ors_error(self):
+        for payload in ({}, {'features': []}, _directions_payload([[-87.6, 41.8]], 10)):
+            self.request.return_value = _response(payload)
+            with self.assertRaises(ors.ORSError):
+                ors.directions(self.start, self.finish)
+
+    def test_http_error_raises_ors_error(self):
+        self.request.return_value = _response({'error': 'quota'}, status=429)
+        with self.assertRaisesMessage(ors.ORSError, 'HTTP 429'):
+            ors.directions(self.start, self.finish)

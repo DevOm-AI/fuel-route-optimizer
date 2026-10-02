@@ -9,6 +9,7 @@ from routing.services.cities import lookup_city
 
 ORS_BASE_URL = 'https://api.openrouteservice.org'
 TIMEOUT_SECONDS = 15
+METERS_PER_MILE = 1609.344
 
 # Continental US, Alaska and Hawaii as (min_lng, min_lat, max_lng, max_lat).
 US_BOUNDS = (
@@ -34,6 +35,12 @@ class Location:
     lat: float
     lng: float
     source: str  # 'local' or 'ors'
+
+
+@dataclass(frozen=True)
+class Route:
+    coordinates: list  # [[lng, lat], ...] along the road
+    distance_miles: float
 
 
 def is_in_usa(lat, lng):
@@ -92,3 +99,22 @@ def geocode(text):
     if (country and country != 'USA') or not is_in_usa(lat, lng):
         raise LocationError(f'"{text}" is outside the USA.')
     return Location(text, lat, lng, 'ors')
+
+
+def directions(start, finish):
+    """One ORS driving call from start to finish (Locations); returns the road line and distance."""
+    data = _request(
+        'POST',
+        '/v2/directions/driving-car/geojson',
+        # ORS expects [lng, lat] order.
+        json={'coordinates': [[start.lng, start.lat], [finish.lng, finish.lat]]},
+    )
+    try:
+        feature = data['features'][0]
+        coordinates = [[float(lng), float(lat)] for lng, lat, *_ in feature['geometry']['coordinates']]
+        distance_meters = float(feature['properties']['summary']['distance'])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ORSError('OpenRouteService returned an invalid directions response.') from exc
+    if len(coordinates) < 2:
+        raise ORSError('OpenRouteService returned an empty route.')
+    return Route(coordinates, distance_meters / METERS_PER_MILE)
