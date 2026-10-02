@@ -8,6 +8,7 @@ from unittest import mock
 
 import numpy as np
 import requests
+from django.core.cache import cache
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
@@ -377,6 +378,8 @@ class RouteApiTests(TestCase):
     def setUp(self):
         reset_station_index()
         self.addCleanup(reset_station_index)
+        cache.clear()
+        self.addCleanup(cache.clear)
         for opis_id, (lat, lng), price in [
             (1, (41.80, -87.70), '3.50'),
             (2, (40.25, -88.90), '3.00'),
@@ -433,3 +436,22 @@ class RouteApiTests(TestCase):
         FuelStation.objects.all().delete()
         response = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
         self.assertEqual(response.status_code, 422)
+
+
+    def test_repeat_request_is_served_from_cache(self):
+        first = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'}).json()
+        self.assertEqual(self.request.call_count, 1)
+        # Same trip with different spacing/case/abbreviation hits the cache.
+        second = self._post({'start': ' chicago,  il ', 'finish': 'Saint Louis, MO'}).json()
+        self.assertEqual(self.request.call_count, 1)
+        self.assertEqual(second['external_api_calls'], 0)
+        self.assertEqual(second['fuel_stops'], first['fuel_stops'])
+        self.assertEqual(second['total_fuel_cost'], first['total_fuel_cost'])
+
+    def test_errors_are_not_cached(self):
+        self.request.return_value = _response(status=503)
+        self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
+        self.request.return_value = _response(_directions_payload(self.line, 300 * 1609.344))
+        response = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.request.call_count, 2)
