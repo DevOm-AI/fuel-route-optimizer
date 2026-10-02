@@ -1,3 +1,83 @@
-from django.shortcuts import render
+import json
+from urllib.parse import urlencode
 
-# Create your views here.
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+
+from routing.services import ors
+from routing.services.optimizer import NoFuelInRangeError, plan_route_fuel
+from routing.services.stations import get_station_index
+
+MAX_LOCATION_LENGTH = 200
+
+
+class InvalidRequest(Exception):
+    pass
+
+
+def _error(message, status):
+    return JsonResponse({'error': message}, status=status)
+
+
+def _parse_route_request(body):
+    """Return (start, finish) strings from a JSON body, or raise InvalidRequest."""
+    try:
+        data = json.loads(body or b'')
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidRequest('Request body must be valid JSON.') from exc
+    if not isinstance(data, dict):
+        raise InvalidRequest('Request body must be a JSON object.')
+
+    values = []
+    for field in ('start', 'finish'):
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise InvalidRequest(f'"{field}" is required and must be a non-empty string.')
+        if len(value) > MAX_LOCATION_LENGTH:
+            raise InvalidRequest(f'"{field}" must be at most {MAX_LOCATION_LENGTH} characters.')
+        values.append(value.strip())
+    if values[0].lower() == values[1].lower():
+        raise InvalidRequest('"start" and "finish" must be different locations.')
+    return values
+
+
+def build_route_result(start_text, finish_text):
+    """geocode -> directions -> stations near route -> optimizer, as a JSON-ready dict."""
+    start = ors.geocode(start_text)
+    finish = ors.geocode(finish_text)
+    route = ors.directions(start, finish)
+    nearby = get_station_index().near_route(route.coordinates, total_miles=route.distance_miles)
+    plan = plan_route_fuel(nearby, route.distance_miles, start)
+
+    api_calls = 1 + sum(loc.source == 'ors' for loc in (start, finish))
+    return {
+        'start': {'query': start.query, 'lat': start.lat, 'lng': start.lng},
+        'finish': {'query': finish.query, 'lat': finish.lat, 'lng': finish.lng},
+        'total_distance_miles': round(route.distance_miles, 1),
+        **plan,
+        'route': {
+            'type': 'Feature',
+            'geometry': {'type': 'LineString', 'coordinates': route.coordinates},
+            'properties': {},
+        },
+        'external_api_calls': api_calls,
+    }
+
+
+@csrf_exempt
+@require_POST
+def route(request):
+    try:
+        start_text, finish_text = _parse_route_request(request.body)
+        result = build_route_result(start_text, finish_text)
+    except (InvalidRequest, ors.LocationError) as exc:
+        return _error(str(exc), 400)
+    except NoFuelInRangeError as exc:
+        return _error(str(exc), 422)
+    except ors.ORSError as exc:
+        return _error(str(exc), 502)
+
+    query = urlencode({'start': start_text, 'finish': finish_text})
+    result['map_url'] = request.build_absolute_uri(f'/api/route/map/?{query}')
+    return JsonResponse(result)

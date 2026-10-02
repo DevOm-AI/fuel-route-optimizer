@@ -1,3 +1,4 @@
+import json
 import tempfile
 from decimal import Decimal
 from io import StringIO
@@ -9,6 +10,7 @@ import numpy as np
 import requests
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
 
 from routing.management.commands.load_stations import clean_stations, match_stations
 from routing.models import FuelStation
@@ -288,6 +290,11 @@ class StationsNearRouteTests(SimpleTestCase):
         self.assertEqual(len(nearby), 1)
         self.assertAlmostEqual(nearby[0].mile_marker, mile_markers([[-90, 30], [-90, 31]])[1], delta=1.0)
 
+    def test_scales_mile_markers_to_total_miles(self):
+        index = StationIndex([_station(1, 31.0, -90.0)])  # halfway along the line
+        nearby = index.near_route(self.line, total_miles=200)
+        self.assertAlmostEqual(nearby[0].mile_marker, 100.0, delta=1.0)
+
     def test_empty_index_or_route(self):
         self.assertEqual(StationIndex([]).near_route(self.line), [])
         self.assertEqual(StationIndex([_station(1, 30.0, -90.0)]).near_route([]), [])
@@ -360,3 +367,69 @@ class FuelPlanOutputTests(SimpleTestCase):
         self.assertEqual(plan['total_gallons'], 65.0)
         # Rounded once at the end, from unrounded stop costs.
         self.assertEqual(plan['total_fuel_cost'], round(30 * 3.333333 + 35 * 2.999999, 2))
+
+
+@override_settings(ORS_API_KEY='test-key')
+class RouteApiTests(TestCase):
+    # Chicago -> St. Louis along a straight line (~258 mi), with ORS reporting 300 road miles.
+    line = [[-87.63 + (-90.20 + 87.63) * i / 300, 41.88 + (38.63 - 41.88) * i / 300] for i in range(301)]
+
+    def setUp(self):
+        reset_station_index()
+        self.addCleanup(reset_station_index)
+        for opis_id, (lat, lng), price in [
+            (1, (41.80, -87.70), '3.50'),
+            (2, (40.25, -88.90), '3.00'),
+            (3, (39.00, -89.90), '3.20'),
+        ]:
+            FuelStation.objects.create(
+                opis_id=opis_id, name=f'S{opis_id}', address='I-55', city='Town', state='IL',
+                price=Decimal(price), lat=lat, lng=lng,
+            )
+        patcher = mock.patch.object(ors._session, 'request')
+        self.request = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.request.return_value = _response(_directions_payload(self.line, 300 * 1609.344))
+
+    def _post(self, payload):
+        body = payload if isinstance(payload, str) else json.dumps(payload)
+        return self.client.post(reverse('route'), body, content_type='application/json')
+
+    def test_returns_route_plan(self):
+        response = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data),
+            {'start', 'finish', 'total_distance_miles', 'total_gallons', 'total_fuel_cost',
+             'fuel_stops', 'route', 'map_url', 'external_api_calls'},
+        )
+        self.assertEqual(data['total_distance_miles'], 300.0)
+        self.assertEqual(data['total_gallons'], 30.0)
+        self.assertEqual(data['external_api_calls'], 1)  # both cities resolved locally
+        self.assertEqual(data['route']['geometry']['type'], 'LineString')
+        self.assertAlmostEqual(sum(s['gallons'] for s in data['fuel_stops']), 30.0, places=2)
+        self.assertAlmostEqual(data['total_fuel_cost'], sum(s['cost'] for s in data['fuel_stops']), places=1)
+        self.assertIn('/api/route/map/?start=Chicago', data['map_url'])
+
+    def test_rejects_bad_input(self):
+        for payload in ('not json', '[]', {'start': 'Chicago, IL'}, {'start': '', 'finish': 'X'},
+                        {'start': 5, 'finish': 'X'}, {'start': 'Chicago, IL', 'finish': 'chicago, il'},
+                        {'start': 'a' * 201, 'finish': 'X'}):
+            response = self._post(payload)
+            self.assertEqual(response.status_code, 400, payload)
+            self.assertIn('error', response.json())
+        self.request.assert_not_called()
+
+    def test_get_is_not_allowed(self):
+        self.assertEqual(self.client.get(reverse('route')).status_code, 405)
+
+    def test_ors_failure_is_502(self):
+        self.request.return_value = _response(status=503)
+        response = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
+        self.assertEqual(response.status_code, 502)
+
+    def test_no_fuel_in_range_is_422(self):
+        FuelStation.objects.all().delete()
+        response = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
+        self.assertEqual(response.status_code, 422)
