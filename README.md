@@ -75,6 +75,9 @@ Here is the real response for that call. I kept the first 2 of its 17 fuel stops
 
 Open `map_url` in a browser to see the route and stops on a Leaflet map.
 
+There is a Postman collection at `postman/fuel-route-optimizer.postman_collection.json`.
+Import it in Postman and run the requests in order.
+
 Errors come back as `{"error": "..."}`:
 
 - `400`: bad JSON, missing or empty `start`/`finish`, a value over 200 characters, same start and finish, or a place that can't be found or is outside the US.
