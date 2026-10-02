@@ -1,15 +1,19 @@
+import hashlib
 import json
 from urllib.parse import urlencode
 
+from django.core.cache import cache
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from routing.services import ors
+from routing.services.cities import normalize_place
 from routing.services.optimizer import NoFuelInRangeError, plan_route_fuel
 from routing.services.stations import get_station_index
 
 MAX_LOCATION_LENGTH = 200
+ROUTE_CACHE_SECONDS = 60 * 60 * 24
 
 
 class InvalidRequest(Exception):
@@ -65,12 +69,28 @@ def build_route_result(start_text, finish_text):
     }
 
 
+def route_cache_key(start_text, finish_text):
+    normalized = f'{normalize_place(start_text)}|{normalize_place(finish_text)}'
+    return 'route:' + hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def get_route_result(start_text, finish_text):
+    """The route result for (start, finish), computed once and then served from the cache."""
+    key = route_cache_key(start_text, finish_text)
+    result = cache.get(key)
+    if result is not None:
+        return {**result, 'external_api_calls': 0}
+    result = build_route_result(start_text, finish_text)
+    cache.set(key, result, ROUTE_CACHE_SECONDS)
+    return result
+
+
 @csrf_exempt
 @require_POST
 def route(request):
     try:
         start_text, finish_text = _parse_route_request(request.body)
-        result = build_route_result(start_text, finish_text)
+        result = get_route_result(start_text, finish_text)
     except (InvalidRequest, ors.LocationError) as exc:
         return _error(str(exc), 400)
     except NoFuelInRangeError as exc:
