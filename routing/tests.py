@@ -15,8 +15,8 @@ from routing.models import FuelStation
 from routing.services import ors
 from routing.services.cities import lookup_city, normalize_place
 from routing.services.geo import haversine_miles, mile_markers
-from routing.services.optimizer import FuelOption, NoFuelInRangeError, plan_fuel_stops
-from routing.services.stations import Station, StationIndex, get_station_index, reset_station_index, thin_route
+from routing.services.optimizer import FuelOption, NoFuelInRangeError, plan_fuel_stops, plan_route_fuel
+from routing.services.stations import NearbyStation, Station, StationIndex, get_station_index, reset_station_index, thin_route
 
 
 def _row(opis_id, state='TX', price='3.50'):
@@ -333,3 +333,30 @@ class GreedyOptimizerTests(SimpleTestCase):
     def test_no_stations_at_all_raises(self):
         with self.assertRaises(NoFuelInRangeError):
             plan_fuel_stops([], 100)
+
+
+class FuelPlanOutputTests(SimpleTestCase):
+    start = ors.Location('Chicago, IL', 41.88, -87.63, 'local')
+
+    def test_builds_stops_and_totals(self):
+        nearby = [
+            NearbyStation(_station(1, 41.0, -88.0, price='3.333333'), 20.0, 1.0),
+            NearbyStation(_station(2, 40.0, -89.0, price='2.999999'), 300.0, 2.0),
+        ]
+        plan = plan_route_fuel(nearby, 650.0, self.start)
+
+        start_stop, station_stop = plan['fuel_stops']
+        self.assertEqual(start_stop['type'], 'start')
+        self.assertEqual(start_stop['priced_as'], 'S1')
+        self.assertEqual((start_stop['lat'], start_stop['lng'], start_stop['mile_marker']), (41.88, -87.63, 0.0))
+        self.assertEqual(start_stop['gallons'], 30.0)  # 300 mi to the cheaper station
+        self.assertEqual(start_stop['price'], 3.333)
+
+        self.assertEqual(station_stop['type'], 'station')
+        self.assertEqual(
+            {k: station_stop[k] for k in ('name', 'city', 'state', 'mile_marker', 'gallons')},
+            {'name': 'S2', 'city': 'Town', 'state': 'IL', 'mile_marker': 300.0, 'gallons': 35.0},
+        )
+        self.assertEqual(plan['total_gallons'], 65.0)
+        # Rounded once at the end, from unrounded stop costs.
+        self.assertEqual(plan['total_fuel_cost'], round(30 * 3.333333 + 35 * 2.999999, 2))

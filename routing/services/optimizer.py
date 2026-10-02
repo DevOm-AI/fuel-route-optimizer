@@ -88,3 +88,53 @@ def plan_fuel_stops(options, total_miles, range_miles=500.0, mpg=10.0):
         buy(current, range_miles - fuel)
         fuel = range_miles - (route[cheapest].mile - current.mile)
         i = cheapest
+
+
+def plan_route_fuel(nearby_stations, total_miles, start, range_miles=500.0, mpg=10.0):
+    """Plan stops for stations near a route and build the JSON-ready summary.
+
+    nearby_stations: items with .station (name, address, city, state, lat, lng, price)
+    and .mile_marker. start: the trip origin with .query, .lat and .lng.
+    """
+    options = [FuelOption(n.mile_marker, float(n.station.price), n) for n in nearby_stations]
+    purchases = plan_fuel_stops(options, total_miles, range_miles, mpg)
+    nearest = min(nearby_stations, key=lambda n: n.mile_marker, default=None)
+
+    stops = []
+    for purchase in purchases:
+        nearby = purchase.option.data
+        if nearby is None:
+            stop = {
+                'type': 'start',
+                'name': 'Trip start',
+                'address': start.query,
+                'city': None,
+                'state': None,
+                'lat': start.lat,
+                'lng': start.lng,
+                'priced_as': nearest.station.name,
+            }
+        else:
+            station = nearby.station
+            stop = {
+                'type': 'station',
+                'name': station.name,
+                'address': station.address,
+                'city': station.city,
+                'state': station.state,
+                'lat': station.lat,
+                'lng': station.lng,
+            }
+        stop.update(
+            price=round(purchase.option.price, 3),
+            mile_marker=round(purchase.option.mile, 1),
+            gallons=round(purchase.gallons, 3),
+            cost=round(purchase.cost, 2),
+        )
+        stops.append(stop)
+
+    return {
+        'total_gallons': round(total_miles / mpg, 2),
+        'total_fuel_cost': round(sum(p.cost for p in purchases), 2),
+        'fuel_stops': stops,
+    }
