@@ -1,13 +1,18 @@
 import csv
+import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+
+from routing.models import FuelStation
 
 CANADIAN_PROVINCES = frozenset({'AB', 'BC', 'MB', 'NB', 'NS', 'ON', 'QC', 'SK', 'YT'})
 
 DEFAULT_FUEL_CSV = Path(settings.BASE_DIR) / 'data' / 'fuel-prices-for-be-assessment.csv'
+DEFAULT_CITIES_CSV = Path(settings.BASE_DIR) / 'data' / 'uscities.csv'
 
 
 def read_fuel_rows(path):
@@ -39,17 +44,57 @@ def clean_stations(rows):
     return list(cheapest.values())
 
 
+def normalize_place(name):
+    """Normalize a city name for joining: lowercase, trim, 'st.' -> 'saint'."""
+    name = re.sub(r'\s+', ' ', name.strip().lower())
+    return re.sub(r'\bst\b\.?', 'saint', name)
+
+
+def load_city_coords(path):
+    """Map (normalized city, state) to (lat, lng); the first (most populous) row wins."""
+    coords = {}
+    with open(path, newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            key = (normalize_place(row['city']), row['state_id'].strip().upper())
+            coords.setdefault(key, (float(row['lat']), float(row['lng'])))
+    return coords
+
+
+def match_stations(stations, city_coords):
+    """Split stations into (matched with lat/lng, unmatched) by (city, state)."""
+    matched, unmatched = [], []
+    for station in stations:
+        coords = city_coords.get((normalize_place(station['city']), station['state']))
+        if coords is None:
+            unmatched.append(station)
+        else:
+            matched.append({**station, 'lat': coords[0], 'lng': coords[1]})
+    return matched, unmatched
+
+
 class Command(BaseCommand):
     help = 'Load fuel stations from the fuel price CSV.'
 
     def add_arguments(self, parser):
         parser.add_argument('--fuel-csv', type=Path, default=DEFAULT_FUEL_CSV)
+        parser.add_argument('--cities-csv', type=Path, default=DEFAULT_CITIES_CSV)
 
     def handle(self, *args, **options):
-        path = options['fuel_csv']
-        if not path.exists():
-            raise CommandError(f'Fuel CSV not found: {path}')
+        fuel_csv, cities_csv = options['fuel_csv'], options['cities_csv']
+        for path in (fuel_csv, cities_csv):
+            if not path.exists():
+                raise CommandError(f'File not found: {path}')
 
-        rows = list(read_fuel_rows(path))
+        rows = list(read_fuel_rows(fuel_csv))
         stations = clean_stations(rows)
         self.stdout.write(f'Read {len(rows)} rows; {len(stations)} unique US stations after cleaning.')
+
+        matched, unmatched = match_stations(stations, load_city_coords(cities_csv))
+        self.stdout.write(f'Matched: {len(matched)}  Unmatched (skipped): {len(unmatched)}')
+
+        with transaction.atomic():
+            FuelStation.objects.all().delete()
+            FuelStation.objects.bulk_create(
+                (FuelStation(**station) for station in matched), batch_size=1000
+            )
+        self.stdout.write(self.style.SUCCESS(f'Saved {len(matched)} fuel stations.'))
