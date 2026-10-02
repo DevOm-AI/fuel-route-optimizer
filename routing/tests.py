@@ -15,6 +15,7 @@ from routing.models import FuelStation
 from routing.services import ors
 from routing.services.cities import lookup_city, normalize_place
 from routing.services.geo import haversine_miles, mile_markers
+from routing.services.optimizer import FuelOption, NoFuelInRangeError, plan_fuel_stops
 from routing.services.stations import Station, StationIndex, get_station_index, reset_station_index, thin_route
 
 
@@ -305,3 +306,30 @@ class StationIndexLoadingTests(TestCase):
         index = get_station_index()
         self.assertEqual([s.opis_id for s in index.stations], [1])
         self.assertIs(get_station_index(), index)
+
+
+class GreedyOptimizerTests(SimpleTestCase):
+    def test_virtual_start_is_priced_like_the_first_station(self):
+        purchases = plan_fuel_stops([FuelOption(50, 3.0, 'A'), FuelOption(300, 3.5, 'B')], 400)
+        self.assertIsNone(purchases[0].option.data)
+        self.assertEqual(purchases[0].option.price, 3.0)
+        self.assertAlmostEqual(sum(p.gallons for p in purchases), 40.0)
+
+    def test_fills_up_and_moves_to_cheapest_in_range_when_none_cheaper(self):
+        # From the 3.00 start nothing is cheaper; finish is 900 mi away -> fill 500 mi,
+        # go to B (cheapest in range), then buy just enough to finish.
+        options = [FuelOption(0, 3.0, 'A'), FuelOption(200, 3.6, 'X'), FuelOption(450, 3.2, 'B')]
+        purchases = plan_fuel_stops(options, 900)
+        self.assertEqual([p.option.data for p in purchases], [None, 'B'])
+        self.assertAlmostEqual(purchases[0].gallons, 50.0)
+        self.assertAlmostEqual(purchases[1].gallons, (900 - 450 - 50) / 10)
+        self.assertAlmostEqual(sum(p.gallons for p in purchases), 90.0)
+
+    def test_ignores_stations_past_the_finish_and_handles_zero_distance(self):
+        purchases = plan_fuel_stops([FuelOption(10, 3.0, 'A'), FuelOption(150, 1.0, 'Z')], 100)
+        self.assertEqual([p.option.data for p in purchases], [None])
+        self.assertEqual(plan_fuel_stops([FuelOption(0, 3.0)], 0), [])
+
+    def test_no_stations_at_all_raises(self):
+        with self.assertRaises(NoFuelInRangeError):
+            plan_fuel_stops([], 100)
