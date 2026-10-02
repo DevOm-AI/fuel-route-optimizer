@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ result.start.query }} → {{ result.finish.query }} · Fuel Route</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    .summary {
+      position: absolute; z-index: 1000; top: 10px; right: 10px; max-width: 280px;
+      background: #fff; padding: 10px 14px; border-radius: 6px;
+      box-shadow: 0 1px 6px rgba(0, 0, 0, .3); font-size: 14px; line-height: 1.4;
+    }
+    .summary h1 { font-size: 15px; margin: 0 0 6px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="summary">
+    <h1>{{ result.start.query }} → {{ result.finish.query }}</h1>
+    Distance: {{ result.total_distance_miles }} mi<br>
+    Fuel: {{ result.total_gallons }} gal<br>
+    Total cost: ${{ result.total_fuel_cost }}<br>
+    Stops: {{ result.fuel_stops|length }}
+  </div>
+
+  {{ map_data|json_script:"map-data" }}
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    const data = JSON.parse(document.getElementById('map-data').textContent);
+    const map = L.map('map');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+
+    const line = L.geoJSON(data.route, { style: { color: '#2563eb', weight: 4 } }).addTo(map);
+    map.fitBounds(line.getBounds(), { padding: [30, 30] });
+
+    // Build popups from text nodes so names and user input are never parsed as HTML.
+    function popup(lines) {
+      const el = document.createElement('div');
+      lines.forEach((text, i) => {
+        if (i) el.appendChild(document.createElement('br'));
+        const span = document.createElement(i === 0 ? 'strong' : 'span');
+        span.textContent = text;
+        el.appendChild(span);
+      });
+      return el;
+    }
+
+    L.circleMarker([data.start.lat, data.start.lng], { radius: 7, color: '#16a34a', fillOpacity: 1 })
+      .addTo(map).bindPopup(popup(['Start', data.start.query]));
+    L.circleMarker([data.finish.lat, data.finish.lng], { radius: 7, color: '#dc2626', fillOpacity: 1 })
+      .addTo(map).bindPopup(popup(['Finish', data.finish.query]));
+
+    data.fuel_stops.forEach((stop) => {
+      const where = stop.type === 'start' ? `Priced as ${stop.priced_as}` : `${stop.city}, ${stop.state}`;
+      L.marker([stop.lat, stop.lng]).addTo(map).bindPopup(popup([
+        stop.name,
+        where,
+        `Price: $${stop.price.toFixed(3)}/gal`,
+        `Gallons: ${stop.gallons.toFixed(1)}`,
+        `Cost: $${stop.cost.toFixed(2)}`,
+        `Mile ${stop.mile_marker}`,
+      ]));
+    });
+  </script>
+</body>
+</html>

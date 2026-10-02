@@ -455,3 +455,32 @@ class RouteApiTests(TestCase):
         response = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.request.call_count, 2)
+
+
+    def test_map_reads_cached_result_without_calling_ors(self):
+        data = self._post({'start': 'Chicago, IL', 'finish': 'St. Louis, MO'}).json()
+        self.assertEqual(self.request.call_count, 1)
+        response = self.client.get(data['map_url'])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.request.call_count, 1)
+        self.assertContains(response, 'leaflet@1.9.4')
+        self.assertContains(response, 'id="map-data"')
+        self.assertEqual(response.context['map_data']['fuel_stops'], data['fuel_stops'])
+
+    def test_map_computes_once_when_not_cached(self):
+        url = reverse('route-map') + '?start=Chicago,+IL&finish=St.+Louis,+MO'
+        self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertEqual(self.request.call_count, 1)
+
+    def test_map_escapes_user_input(self):
+        self.request.return_value = _response(_directions_payload(self.line, 300 * 1609.344))
+        with mock.patch.object(ors, 'lookup_city', return_value=(41.88, -87.63)):
+            response = self.client.get(reverse('route-map'), {'start': '<script>x</script>, IL', 'finish': 'Peoria, IL'})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '<script>x</script>')
+
+    def test_map_rejects_missing_params(self):
+        response = self.client.get(reverse('route-map'), {'start': 'Chicago, IL'})
+        self.assertEqual(response.status_code, 400)
+        self.request.assert_not_called()

@@ -3,9 +3,11 @@ import json
 from urllib.parse import urlencode
 
 from django.core.cache import cache
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
+from django.shortcuts import render
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 
 from routing.services import ors
 from routing.services.cities import normalize_place
@@ -24,15 +26,8 @@ def _error(message, status):
     return JsonResponse({'error': message}, status=status)
 
 
-def _parse_route_request(body):
-    """Return (start, finish) strings from a JSON body, or raise InvalidRequest."""
-    try:
-        data = json.loads(body or b'')
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise InvalidRequest('Request body must be valid JSON.') from exc
-    if not isinstance(data, dict):
-        raise InvalidRequest('Request body must be a JSON object.')
-
+def _validate_locations(data):
+    """Return stripped (start, finish) from a mapping, or raise InvalidRequest."""
     values = []
     for field in ('start', 'finish'):
         value = data.get(field)
@@ -44,6 +39,17 @@ def _parse_route_request(body):
     if values[0].lower() == values[1].lower():
         raise InvalidRequest('"start" and "finish" must be different locations.')
     return values
+
+
+def _parse_route_request(body):
+    """Return (start, finish) strings from a JSON body, or raise InvalidRequest."""
+    try:
+        data = json.loads(body or b'')
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidRequest('Request body must be valid JSON.') from exc
+    if not isinstance(data, dict):
+        raise InvalidRequest('Request body must be a JSON object.')
+    return _validate_locations(data)
 
 
 def build_route_result(start_text, finish_text):
@@ -99,5 +105,25 @@ def route(request):
         return _error(str(exc), 502)
 
     query = urlencode({'start': start_text, 'finish': finish_text})
-    result['map_url'] = request.build_absolute_uri(f'/api/route/map/?{query}')
+    result['map_url'] = request.build_absolute_uri(f"{reverse('route-map')}?{query}")
     return JsonResponse(result)
+
+
+@require_GET
+def route_map(request):
+    """Leaflet map of a route; served from the cache, computed once if missing."""
+    try:
+        start_text, finish_text = _validate_locations(request.GET)
+        result = get_route_result(start_text, finish_text)
+    except (InvalidRequest, ors.LocationError) as exc:
+        return HttpResponse(str(exc), status=400, content_type='text/plain')
+    except NoFuelInRangeError as exc:
+        return HttpResponse(str(exc), status=422, content_type='text/plain')
+    except ors.ORSError as exc:
+        return HttpResponse(str(exc), status=502, content_type='text/plain')
+
+    map_data = {key: result[key] for key in (
+        'start', 'finish', 'route', 'fuel_stops',
+        'total_distance_miles', 'total_gallons', 'total_fuel_cost',
+    )}
+    return render(request, 'map.html', {'map_data': map_data, 'result': result})
